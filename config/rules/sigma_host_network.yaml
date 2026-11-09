@@ -1,0 +1,85 @@
+rules:
+  - id: SQL_Injection
+    title: SQL injection attempt
+    category: web_attack
+    mitre_id: T1190
+    mitre_tactic: Initial Access
+    base_score: 75
+    regex_patterns:
+      - '(?:UNION\s+(?:ALL\s+)?SELECT|SELECT\s+.+\s+FROM|OR\s+[''"]?1[''"]?\s*=\s*[''"]?1|SLEEP\s*\(|WAITFOR\s+DELAY)'
+      - '(?:%27|''|%22|")\s*(?:OR|AND)\s+[^ ]+\s*='
+    os_event_codes: []
+    soc_action: Inspect the request and block confirmed malicious sources.
+  - id: XSS_Attack
+    title: Cross-site scripting attempt
+    category: web_attack
+    mitre_id: T1059.007
+    mitre_tactic: Execution
+    base_score: 65
+    regex_patterns:
+      - '<\s*script\b|javascript\s*:|onerror\s*=|onload\s*='
+    os_event_codes: []
+    soc_action: Review the request and validate output encoding.
+  - id: Path_Traversal
+    title: Path traversal attempt
+    category: web_attack
+    mitre_id: T1083
+    mitre_tactic: Discovery
+    base_score: 65
+    regex_patterns:
+      - '(?:\.\.[\\/]){2,}|/etc/passwd|\\windows\\system32'
+    os_event_codes: []
+    soc_action: Review access logs and restrict filesystem access.
+  - id: Command_Injection
+    title: OS command injection attempt
+    category: web_attack
+    mitre_id: T1059
+    mitre_tactic: Execution
+    base_score: 75
+    regex_patterns:
+      - '(?:;\s*(?:CAT|WHOAMI|ID|CURL|WGET)\b|\|\s*(?:SH|BASH|CMD)\b|\$\([^)]*(?:WHOAMI|ID))'
+      - '(?:CMD|COMMAND|EXEC|RUN)=\s*(?:WHOAMI|ID|CAT|CURL|WGET|POWERSHELL|SH)\b'
+    os_event_codes: []
+    soc_action: Investigate the request and associated child processes.
+  - id: Malware_Exploit
+    title: SMB exploit or malware activity
+    category: network_attack
+    mitre_id: T1210
+    mitre_tactic: Lateral Movement
+    base_score: 85
+    regex_patterns:
+      - 'ETERNALBLUE|MS17-010|SMB(?:1)?\s+EXPLOIT'
+    os_event_codes: []
+    soc_action: Isolate affected assets and investigate SMB exposure.
+  - id: Suspicious_PowerShell
+    title: Suspicious PowerShell behavior
+    category: execution
+    mitre_id: T1059.001
+    mitre_tactic: Execution
+    base_score: 80
+    regex_patterns:
+      - '(?:-E(?:NC(?:ODEDCOMMAND)?)?\b|DOWNLOADSTRING|(?:^|\W)IEX(?:\W|$)|MIMIKATZ|(?:^|\W)BYPASS(?:\W|$)|(?:^|\W)HIDDEN(?:\W|$)|FROMBASE64STRING)'
+    os_event_codes: []
+    soc_action: Review script-block content, parent process, and user context.
+  - id: Audit_Log_Tampering
+    title: Audit log cleared
+    category: defense_evasion
+    mitre_id: T1070.001
+    mitre_tactic: Defense Evasion
+    base_score: 90
+    regex_patterns:
+      - 'CLEAR-EVENTLOG|WEVTUTIL\s+CL|AUDIT.{0,30}LOG.{0,20}CLEARED'
+    os_event_codes:
+      - 1102
+    soc_action: Preserve remaining evidence and investigate the initiating account.
+  - id: Service_Persistence
+    title: Suspicious service installation
+    category: persistence
+    mitre_id: T1543.003
+    mitre_tactic: Persistence
+    base_score: 75
+    regex_patterns:
+      - 'SC\.EXE\s+CREATE|NEW-SERVICE|SERVICE.{0,30}INSTALLED'
+    os_event_codes:
+      - 7045
+    soc_action: Validate the service binary, signer, and change authorization.

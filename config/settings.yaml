@@ -1,0 +1,11 @@
+database_path: aegis_soc.db
+rule_path: config/rules/sigma_host_network.yaml
+correlation_window_seconds: 300
+static_traffic_tuning: true
+asset_criticality:
+  workstation: 1.0
+  server: 1.5
+  domain_controller: 2.0
+  web_server: 1.5
+  network: 1.8
+default_asset: workstation

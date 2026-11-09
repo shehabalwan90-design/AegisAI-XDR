@@ -1,0 +1,10 @@
+pandas
+numpy
+PyYAML
+rich
+scikit-learn
+pytest
+pywin32; platform_system == "Windows"
+customtkinter
+matplotlib
+reportlab
