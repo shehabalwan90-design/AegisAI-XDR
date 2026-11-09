@@ -8,3 +8,4 @@ pywin32; platform_system == "Windows"
 customtkinter
 matplotlib
 reportlab
+psutil

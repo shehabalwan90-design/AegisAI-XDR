@@ -53,11 +53,48 @@ def run_pipeline(
     behavioral = BehavioralEngine(history_events)
     threat_intel = ThreatIntel(ROOT / "data" / "threat_intel.json")
     alerts: list[dict[str, Any]] = []
+    raw_by_id = {str(raw.get("event_id") or ""): raw for raw in raw_events}
     for event in events:
+        source_record = raw_by_id.get(event.event_id, {})
+        if source_record.get("collector_type") == "windows_security":
+            event.detection_type = str(source_record.get("detection_type") or "")
+            event.mitre_technique = str(source_record.get("mitre_technique") or "")
+            event.mitre_tactic = str(source_record.get("mitre_tactic") or "")
+            event.event_severity = str(source_record.get("event_severity") or "Benign")
+        elif source_record.get("collector_type") == "network":
+            event.detection_type = "Network Connection"
         event_alerts = behavioral.classify(event)
         event_alerts.extend(atomic.classify(event))
         event_alerts.extend(correlation.process(event))
         for indicator in threat_intel.match_event(event):
+            is_network_c2 = (
+                source_record.get("collector_type") == "network"
+                and indicator.startswith("Known threat IP:")
+            )
+            if is_network_c2:
+                event.detection_type = "Malicious IP - C2"
+                event.mitre_technique = "T1071 - Application Layer Protocol"
+                event.mitre_tactic = "Command and Control"
+                event.event_severity = "Critical"
+                event_alerts.append(
+                    {
+                        "event_id": event.event_id,
+                        "rule_id": "Malicious_IP_C2",
+                        "title": "Malicious IP - C2",
+                        "category": "threat_intelligence",
+                        "mitre_id": "T1071",
+                        "mitre_tactic": "Command and Control",
+                        "base_score": 100,
+                        "risk_score": 100,
+                        "severity": "Critical",
+                        "soc_action": "Validate the remote endpoint and investigate the owning process.",
+                        "src_ip": event.src_ip,
+                        "timestamp": event.timestamp,
+                        "process_name": event.process_name,
+                        "anomaly_score": event.anomaly_score,
+                    }
+                )
+                continue
             severity = "Critical" if "SHA-256" in indicator else "High"
             score, _ = score_risk(100 if severity == "Critical" else 85, event.asset_weight)
             event_alerts.append(
@@ -77,8 +114,31 @@ def run_pipeline(
                     "anomaly_score": event.anomaly_score,
                 }
             )
+        if source_record.get("collector_type") == "windows_security":
+            if event.os_event_code == 4625:
+                event_alerts.append(
+                    {
+                        "event_id": event.event_id,
+                        "rule_id": "Security_Failed_Logon",
+                        "title": event.detection_type,
+                        "category": "authentication",
+                        "mitre_id": "T1110",
+                        "mitre_tactic": "Credential Access",
+                        "base_score": 75,
+                        "risk_score": 75,
+                        "severity": "High",
+                        "soc_action": "Review source IP, account, and nearby authentication events.",
+                        "src_ip": event.src_ip,
+                        "timestamp": event.timestamp,
+                        "anomaly_score": event.anomaly_score,
+                    }
+                )
         high_findings = [alert for alert in event_alerts if alert["risk_score"] > 70]
-        if event.anomaly_score > 85 and high_findings:
+        if (
+            event.anomaly_score > 85
+            and high_findings
+            and not any(alert["rule_id"] == "Malicious_IP_C2" for alert in high_findings)
+        ):
             event_alerts = [
                 alert for alert in event_alerts if alert["risk_score"] <= 70
             ]

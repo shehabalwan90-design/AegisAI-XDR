@@ -39,6 +39,10 @@ class NormalizedEvent:
     command_line: str = ""
     decoded_payload: str = ""
     anomaly_score: int = 0
+    detection_type: str = ""
+    mitre_technique: str = ""
+    mitre_tactic: str = ""
+    event_severity: str = "Benign"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -150,4 +154,8 @@ def normalize_event(
         process_path=process_path,
         command_line=command_line,
         decoded_payload=decoded_payload,
+        detection_type=str(raw.get("detection_type") or ""),
+        mitre_technique=str(raw.get("mitre_technique") or ""),
+        mitre_tactic=str(raw.get("mitre_tactic") or ""),
+        event_severity=str(raw.get("event_severity") or "Benign"),
     )

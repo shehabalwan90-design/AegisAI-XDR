@@ -20,6 +20,8 @@ It doesn't just use signatures. It uses **Behavioral AI (Isolation Forest)** to 
 ## 🚀 Features
 
 - **LIVE Mode:** Real-time monitoring of processes, network & files
+- **Windows Security Events:** LIVE collects Event IDs 4624, 4625, and 4688 with source IP, user, detection, and MITRE technique.
+- **Network Connections:** LIVE captures remote IP, port, and owning process; threat-intel matches are Critical C2 detections.
 - **SIMULATE Mode:** 5 attack scenarios for safe training (Ransomware, Reverse Shell, Exfiltration, Miner, Port Scan)
 - **Behavioral Engine:** Isolation Forest trained on your own baseline
 - **Threat Intel:** Free public feeds only - No API key required. Abuse.ch key is optional.

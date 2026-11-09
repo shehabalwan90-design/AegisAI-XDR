@@ -2,7 +2,9 @@ from pathlib import Path
 import hashlib
 import io
 import json
+import socket
 import sys
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -15,6 +17,8 @@ from src.engine.evaluation import evaluate_predictions
 from src.normalizer.parser import deobfuscate_payload, normalize_event
 from src.storage.baseline import BaselineStore
 from src.engine.threat_intel import ThreatIntel
+from src.collectors.network_connections_collector import NetworkConnectionsCollector
+from src.collectors.windows_security_collector import WindowsSecurityEventCollector
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,7 +99,100 @@ def test_normalized_shape_and_risk_fields():
         "failed_logins", "pkt_rate", "raw_payload", "clean_payload", "true_label",
         "parent_process", "parent_process_chain", "process_id", "parent_process_id",
         "process_path", "command_line", "decoded_payload", "anomaly_score",
+        "detection_type", "mitre_technique", "mitre_tactic", "event_severity",
     }
+
+
+def test_windows_security_collector_enriches_auth_and_process_events(monkeypatch):
+    records = [
+        {
+            "event_id": "Security:1",
+            "timestamp": "2026-11-09T12:00:00+00:00",
+            "os_event_code": event_id,
+            "user": "analyst",
+            "src_ip": "198.51.100.10",
+        }
+        for event_id in (4625, 4624, 4688)
+    ]
+    monkeypatch.setattr(
+        "src.collectors.windows_security_collector.platform.system",
+        lambda: "Windows",
+    )
+    monkeypatch.setattr(
+        "src.collectors.windows_security_collector.subprocess.run",
+        Mock(return_value=SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(records),
+            stderr="",
+        )),
+    )
+
+    collected = WindowsSecurityEventCollector().collect()
+
+    assert [event["detection_type"] for event in collected] == [
+        "Failed Login - Brute Force",
+        "Successful Login",
+        "Process Creation",
+    ]
+    assert collected[0]["src_ip"] == "198.51.100.10"
+    assert collected[0]["user"] == "analyst"
+    assert collected[0]["mitre_technique"] == "T1110 - Brute Force"
+    assert collected[1]["mitre_technique"] == "T1078 - Valid Accounts"
+    assert collected[2]["mitre_technique"].startswith("T1059")
+
+
+def test_network_collector_captures_remote_ip_port_and_process(monkeypatch):
+    import psutil
+
+    connection = SimpleNamespace(
+        raddr=SimpleNamespace(ip="198.51.100.20", port=443),
+        pid=123,
+        type=socket.SOCK_STREAM,
+    )
+    process = SimpleNamespace(name=lambda: "browser.exe", exe=lambda: r"C:\browser.exe")
+    monkeypatch.setattr(psutil, "net_connections", lambda kind: [connection])
+    monkeypatch.setattr(psutil, "Process", lambda pid: process)
+
+    events = NetworkConnectionsCollector().collect()
+
+    assert len(events) == 1
+    assert events[0]["src_ip"] == "198.51.100.20"
+    assert events[0]["dst_port"] == 443
+    assert events[0]["process_name"] == "browser.exe"
+    assert events[0]["collector_type"] == "network"
+
+
+def test_network_ioc_is_promoted_to_critical_c2_alert(monkeypatch):
+    import main
+
+    class MatchingIntel:
+        def __init__(self, _path):
+            pass
+
+        def match_event(self, event):
+            return ["Known threat IP: 198.51.100.20"] if event.src_ip else []
+
+    monkeypatch.setattr(main, "ThreatIntel", MatchingIntel)
+    raw_event = {
+        "event_id": "network:TCP|198.51.100.20|443|123",
+        "collector_type": "network",
+        "src_ip": "198.51.100.20",
+        "dst_ip": "198.51.100.20",
+        "dst_port": 443,
+        "process_name": "browser.exe",
+        "raw_payload": "remote connection",
+    }
+
+    events, alerts = main.run_pipeline([raw_event], main.load_settings())
+
+    assert events[0].detection_type == "Malicious IP - C2"
+    assert events[0].event_severity == "Critical"
+    assert any(
+        alert["rule_id"] == "Malicious_IP_C2"
+        and alert["severity"] == "Critical"
+        and alert["title"] == "Malicious IP - C2"
+        for alert in alerts
+    )
 
 
 def test_stable_string_event_identifier_is_not_parsed_as_event_code():

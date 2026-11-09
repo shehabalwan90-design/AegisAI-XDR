@@ -6,6 +6,7 @@ import csv
 from datetime import datetime, timezone
 import hashlib
 import html
+import platform
 import queue
 import threading
 import time
@@ -24,6 +25,8 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 from src.collectors.base_collector import create_platform_collector
 from src.collectors.attack_simulator import generate_events
+from src.collectors.network_connections_collector import NetworkConnectionsCollector
+from src.collectors.windows_security_collector import WindowsSecurityEventCollector
 from src.engine.threat_intel import ThreatIntel
 from src.engine.evaluation import evaluate_predictions
 from src.normalizer.parser import NormalizedEvent
@@ -198,9 +201,9 @@ class AegisDashboard:
             values=["All", "Critical", "High", "Medium", "Low", "Benign"],
             variable=self.severity_filter,
             width=140,
-            command=lambda _: self._render_table(),
         )
         severity.pack(side="left")
+        self.severity_filter.trace_add("write", lambda *_: self._render_table())
 
         table_frame = ctk.CTkFrame(toolbar, fg_color="#111b2e", corner_radius=8)
         table_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
@@ -223,7 +226,19 @@ class AegisDashboard:
             relief="flat",
         )
         style.map("Aegis.Treeview", background=[("selected", "#254f7d")])
-        columns = ("timestamp", "severity", "host", "user", "process", "rule", "source", "anomaly", "count")
+        columns = (
+            "timestamp",
+            "severity",
+            "host",
+            "user",
+            "process",
+            "detection",
+            "source",
+            "port",
+            "mitre",
+            "anomaly",
+            "count",
+        )
         self.tree = ttk.Treeview(
             table_frame, columns=columns, show="headings", style="Aegis.Treeview"
         )
@@ -233,13 +248,15 @@ class AegisDashboard:
             ("host", "HOST", 110),
             ("user", "USER", 80),
             ("process", "PROCESS", 115),
-            ("rule", "DETECTION / EVENT", 200),
-            ("source", "SOURCE IP", 100),
+            ("detection", "DETECTION / EVENT", 190),
+            ("source", "SOURCE IP", 115),
+            ("port", "REMOTE PORT", 78),
+            ("mitre", "MITRE TECHNIQUE", 185),
             ("anomaly", "ANOMALY", 72),
             ("count", "COUNT", 55),
         ):
             self.tree.heading(name, text=title)
-            self.tree.column(name, width=width, minwidth=55, stretch=name in {"rule"})
+            self.tree.column(name, width=width, minwidth=55, stretch=name in {"detection"})
         scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -314,6 +331,24 @@ class AegisDashboard:
     def _collect_live(self) -> dict[str, Any]:
         collector = create_platform_collector()
         raw_events = collector.collect(250)
+        collection_warnings = list(getattr(collector, "collection_warnings", []))
+        if platform.system().lower() == "windows":
+            security_ids = set(WindowsSecurityEventCollector.EVENT_IDS)
+            raw_events = [
+                event
+                for event in raw_events
+                if int(event.get("os_event_code") or 0) not in security_ids
+            ]
+            try:
+                security_collector = WindowsSecurityEventCollector()
+                raw_events.extend(security_collector.collect(250))
+                collection_warnings.extend(security_collector.collection_warnings)
+            except (OSError, RuntimeError, ValueError) as error:
+                collection_warnings.append(f"Windows Security events collection failed: {error}")
+        try:
+            raw_events.extend(NetworkConnectionsCollector().collect(250))
+        except (OSError, RuntimeError, ValueError) as error:
+            collection_warnings.append(f"Network connections collection failed: {error}")
         snapshot: dict[str, Any] = {}
         if hasattr(collector, "collect_host_snapshot"):
             snapshot = collector.collect_host_snapshot()
@@ -385,7 +420,7 @@ class AegisDashboard:
             "differences": differences,
             "first_baseline": previous is None and bool(snapshot),
             "baseline_captured_at": (baseline.load() or {}).get("captured_at", ""),
-            "warnings": getattr(collector, "collection_warnings", []),
+            "warnings": collection_warnings,
         }
 
     @staticmethod
@@ -682,7 +717,14 @@ class AegisDashboard:
         for event in self.events:
             alerts = self.alert_by_event.get(event.event_id, [])
             if not alerts:
-                key = (event.process_name, event.raw_payload, "Benign")
+                key = (
+                    event.process_name,
+                    event.raw_payload,
+                    event.detection_type,
+                    event.src_ip,
+                    event.dst_port,
+                    event.event_severity,
+                )
                 grouped[key] = (event, [], grouped.get(key, (event, [], 0))[2] + 1)
                 continue
             for alert in alerts:
@@ -700,21 +742,25 @@ class AegisDashboard:
                 )
         records = list(grouped.values())
         query = self.search_text.get().strip().lower()
-        severity = self.severity_filter.get()
+        severity = self.severity_filter.get().strip().casefold()
         filtered: list[tuple[NormalizedEvent, list[dict[str, Any]], int]] = []
         for event, alerts, count in records:
-            level = alerts[0]["severity"] if alerts else "Benign"
+            level = str(alerts[0]["severity"] if alerts else event.event_severity).casefold()
             searchable = " ".join(
                 (
                     event.host_name,
                     event.user,
                     event.process_name,
+                    event.detection_type,
+                    event.mitre_technique,
                     event.raw_payload,
                     " ".join(alert["title"] for alert in alerts),
                     event.src_ip,
+                    event.dst_ip,
+                    str(event.dst_port),
                 )
             ).lower()
-            if severity not in {"All", level} or (query and query not in searchable):
+            if severity not in {"all", level} or (query and query not in searchable):
                 continue
             filtered.append((event, alerts, count))
         return sorted(filtered, key=lambda row: row[0].timestamp, reverse=True)
@@ -723,8 +769,8 @@ class AegisDashboard:
         self.tree.delete(*self.tree.get_children())
         for index, (event, alerts, count) in enumerate(self._visible_records()):
             alert = alerts[0] if alerts else {}
-            severity = alert.get("severity", "Benign")
-            rule = alert.get("title", "Observed event")
+            severity = alert.get("severity", event.event_severity)
+            detection = alert.get("title") or event.detection_type or "Observed event"
             timestamp = event.timestamp.replace("T", " ")[:19]
             row = (
                 timestamp,
@@ -732,8 +778,10 @@ class AegisDashboard:
                 event.host_name,
                 event.user,
                 event.process_name or "—",
-                rule,
+                detection,
                 alert.get("src_ip") or event.src_ip or "—",
+                event.dst_port or "—",
+                event.mitre_technique or alert.get("mitre_id") or "—",
                 str(event.anomaly_score),
                 f"x{count}",
             )
@@ -756,14 +804,17 @@ class AegisDashboard:
             return
         event, alerts, count = visible[index]
         alert = alerts[0] if alerts else {}
-        tactic = alert.get("mitre_tactic", "—")
-        technique = alert.get("mitre_id", "—")
+        tactic = event.mitre_tactic or alert.get("mitre_tactic") or "—"
+        technique = event.mitre_technique or alert.get("mitre_id") or "—"
         details = [
             f"FORENSIC TIMELINE  |  {event.timestamp}",
             f"{event.host_name}  •  {event.user or 'unknown user'}  •  {event.process_name or 'event'}",
             f"Parent: {event.parent_process or 'unknown'}",
             f"Parent lineage: {event.parent_process_chain or 'not available'}",
-            f"Rule: {alert.get('title', 'No alert')}  |  Severity: {alert.get('severity', 'Benign')}  |  Duplicates: x{count}",
+            f"Detection: {alert.get('title') or event.detection_type or 'Observed event'}  |  "
+            f"Severity: {alert.get('severity', event.event_severity)}  |  Duplicates: x{count}",
+            f"Source IP: {event.src_ip or '—'}  |  Remote IP: {event.dst_ip or '—'}  |  "
+            f"Remote port: {event.dst_port or '—'}",
             f"Anomaly score: {event.anomaly_score}/100",
             f"MITRE ATT&CK: {technique}  |  {tactic}",
             f"Mitigation: {MITRE_MITIGATIONS.get(tactic, 'Investigate the event and validate its context.')}",
